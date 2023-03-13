@@ -1,0 +1,46 @@
+Google menaged prometheus
+
+can be enabled with GKE flags using terraform etc
+
+or can use prometheus operator
+replacing prometheus image with gcp prometheus image
+thin fork of original prometheus
+
+components
+
+managed prometheus deployed using gke
+
+alertmanager
+collector - prometheus fork, data collection is handled
+gmp-operator
+rule-evaluator - executed rules and alerts
+
+distributing task into individual components
+
+managed prometheus uses pod monitoring crds as well-built by google apis
+
+cost is for data ingestion
+no cost for storage
+nominal calls for read api
+
+retention
+
+24 months at no additional cost
+minimum scrape interval of 5 sec
+
+storage
+full granularity for 1 week
+then downsampled to 1 mins for next 5 weeks
+then downsampled to 10 minutes and stored for the retention period
+
+monarch - distributed global database for metrics
+
+---------------------------------
+
+migrate existing prometheus workloads
+
+
+
+
+
+

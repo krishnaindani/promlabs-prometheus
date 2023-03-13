@@ -1,0 +1,76 @@
+
+Getting all series in the TSDB
+
+Internally the metric name is stored as a special label __name __
+
+getting all series in tsdb with active series that has recent data
+
+{__name__!=""}
+
+Note: This returns all active series so will overload prometheus if large
+
+Getting all series for a metric name
+
+If you already know the metric name and want to see all asssociated series and labels pairs
+simply query
+
+demo_cpu_usage_seconds_total
+
+This should work unless there is huge number of label series
+
+Getting all metric names
+
+get the list of metrics
+
+first select the series and then group by __name__
+
+group by(__name__) ({__name__!=""})
+
+A more efficient non promql way is to get using label values metadata endpoint to get all values for __name__ label
+ex  https://demo.promlabs.com/api/v1/label/name/values
+This method ui uses to list
+
+Getting all values for a specific label
+
+For example, get all possible values of mode label on metric demo_cpu_usage_seconds_total
+
+group by(mode) (demo_cpu_usage_seconds_total)
+
+You could even do this across all metric names / all series:
+
+group by(mode) ({__name__!=""})
+
+Breaking up series cost by job, instance, metric name, ...
+
+Used for sys admin purpose on where the series are coming from etc
+
+Number of series per metric name:
+
+sort_desc(count by(__name__) ({__name__!=""}))
+
+Number of series per target:
+
+sort_desc(count by (instance) ({__name__!=""}))
+
+Number of series per job and metric name combination:
+
+sort_desc(count by (job, __name__) ({__name__!=""}))
+
+
+To count how many different values the le histogram bucket label has in a given histogram metric
+(e.g. demo_api_request_duration_seconds_bucket), you could query for:
+
+count(group by (le) (demo_api_request_duration_seconds_bucket))
+
+...and you can take this further to count how many series there are for any dimensional combination,
+such as the le label per job in the same histogram:
+
+count(group by (le, job) (demo_api_request_duration_seconds_bucket))
+
+Getting the meaning and type of a metric name
+
+The meaning of the metric, their documentation and metric type are available but not via promql
+Prometheus keeps that in memory for each target and can be queried via metadata api endpoint
+
+promlens and grafana uses this metadata api to get info
+

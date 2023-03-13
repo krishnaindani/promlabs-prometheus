@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
 	"net/http"
 )
@@ -92,10 +91,6 @@ func main() {
 
 	//Note that both methods panic during runtime if you pass an inconsistent set of parameters to
 	//them (incorrect number of labels or incorrect label names)
-
-	http.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{
-		Registry: registry,
-	}))
 
 	log.Fatalln(http.ListenAndServe(":8080", nil))
 }

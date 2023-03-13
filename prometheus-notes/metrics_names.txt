@@ -1,0 +1,37 @@
+
+
+application - instrumentation
+exposition in the format
+prometheus - processing
+user - querying(promql)
+
+counters end with total
+gauge end with nothing
+histogram ends with bucket
+summary with nothing
+
+no way to see if you pass wrong metrics type to query
+
+for counters - rate, irate, increase, resets
+
+gauge - delta, idelta, deriv, predict_linear
+dont use rate for gauge as increase/decrease can count as reset
+These functions only work properly for gauge metrics, as they treat
+increases and decreases in input metrics the same, and don't interpret
+decreases as counter resets.
+
+metric name is stored as __name__ label
+
+prometheus as a set of interfaces
+
+exposition format - to scrape from targets by prometheus
+remote write protocol - prometheus to remote storage
+promql - querying from grafana/promlens to prometheus
+alerting protocol - prometheus sending alerts to alertmanager
+
+remote write has been the biggest enabler for saas provider
+
+
+
+
+

@@ -1,0 +1,296 @@
+Blog: https://blog.cloudflare.com/how-cloudflare-runs-prometheus-at-scale/
+
+Metric - We start with a metric - that’s simply a definition of something that we can observe, like the number of mugs drunk.
+
+Samples - Our metrics are exposed as a HTTP response. That response will have a list of samples - these are individual instances
+of our metric (represented by name & labels), plus the current value.
+
+Time series - When Prometheus collects all the samples from our HTTP response it adds the timestamp of that collection and with
+all this information together we have a time series.
+
+prometheus adds timestamp at the time of scrape
+
+-- cardanility explosion
+
+some metrics suddenly adds a huge number of distinct label values, creats a huge number of time series,
+causes prometheus to run out of memory and crash.
+
+-- How Prometheus is using memory?
+
+All steps in the life of time series inside prometheus
+
+Step One: HTTP Scrape
+
+sends the http request to scrape. Record the time it sends the http requests and use that later
+as the timestamp for all collected time series.
+
+Step Two: New time series or an update
+
+Checks with tsdb whether the sample is already present or a completely new one
+
+internally time series are just names with another label __name__
+
+ex.
+mugs_of_beverage_total{content="tea", temperature="hot"} 1
+{__name__="mugs_of_beverage_total", content="tea", temperature="hot"} 1
+
+the samples are hashed using sha256 and checked
+Basically our labels hash is used as a primary key inside TSDB.
+
+hash({__name__="mugs_of_beverage_total", content="tea", temperature="hot"}) => 5675328
+hash({__name__="mugs_of_beverage_total", content="coffee", temperature="hot"}) => 476523
+
+Step Three: Appending to TSDB
+
+Once tsdb knows it has to insert new time series or update existing ones it can start the real work
+
+Internally all time series are stored inside map on a structure called as Head.
+The map uses labels hashes as keys and structure called as memseries as values
+
+by default prometheus creates chunk every 2 hours
+
+head chunk is appended to other chunks
+Once chunk are flushed its read only
+
+There is a maximum of 120 samples each chunk can hold. This is because once we have more than 120
+samples on a chunk efficiency of “varbit” encoding drops
+
+All chunks must be aligned to those two hour slots of wall clock time, so if TSDB was building a chunk
+for 10:00-11:59 and it was already “full” at 11:30 then it would create an extra chunk for the
+11:30-11:59 time range.
+
+Step four: memory mapping old chunks
+
+After a few hours of Prometheus running and scraping metrics we will likely have more than one chunk on our time series:
+
+One “Head Chunk” - containing up to two hours of the last two hour wall clock slot.
+One or more for historical ranges - these chunks are only for reading, Prometheus won’t try to append anything here.
+Since all these chunks are stored in memory Prometheus will try to reduce memory usage by writing them to disk and
+memory-mapping. The advantage of doing this is that memory-mapped chunks don’t use memory unless TSDB needs to read them.
+
+The Head Chunk is never memory-mapped, it’s always stored in memory.
+
+Step five: writing blocks to disk
+
+memory mapped chunks are offloaded to disks
+But this will be brough to memory if needed by queries
+
+every 2 hours chunks are created and stored to disk next hour
+
+When using Prometheus defaults and assuming we have a single chunk for each two hours of wall clock we would see this:
+
+02:00 - create a new chunk for 02:00 - 03:59 time range
+03:00 - write a block for 00:00 - 01:59
+04:00 - create a new chunk for 04:00 - 05:59 time range
+05:00 - write a block for 02:00 - 03:59
+…
+22:00 - create a new chunk for 22:00 - 23:59 time range
+23:00 - write a block for 20:00 - 21:59
+
+Step six: Garbage collection
+Once the last chunk for this time series is written into a block and removed from the memSeries instance we
+have no chunks left. This means that our memSeries still consumes some memory (mostly labels) but doesn’t
+really do anything.
+
+To get rid of such time series Prometheus will run “head garbage collection” (remember that Head is the
+structure holding all memSeries) right after writing a block. This garbage collection, among other
+things, will look for any time series without a single chunk and remove it from memory.
+
+In Nutshell?
+
+TSDB used in Prometheus is a special kind of database that was highly optimized for a very specific workload:
+
+Time series scraped from applications are kept in memory.
+Samples are compressed using encoding that works best if there are continuous updates.
+Chunks that are a few hours old are written to disk and removed from memory.
+When time series disappear from applications and are no longer scraped they still stay in memory until all
+chunks are written to disk and garbage collection removes them.
+
+This means that Prometheus is most efficient when continuously scraping the same time series over and over
+again. It’s least efficient when it scrapes a time series just once and never again - doing so comes with
+a significant memory usage overhead when compared to the amount of information stored using that memory.
+
+The important information is short lived time series is expensive
+A time series that was only scraped once is guaranteed to live in Prometheus for one to three hours,
+depending on the exact time of that scrape.
+
+-- The cost of cardinality
+
+At this point we should know a few things about Prometheus:
+
+We know what a metric, a sample and a time series is.
+We know that the more labels on a metric, the more time series it can create.
+We know that each time series will be kept in memory.
+We know that time series will stay in memory for a while, even if they were scraped only once.
+
+
+-- How much memory does a time series need?
+
+Each time series stored inside Prometheus (as a memSeries instance) consists of:
+
+Copy of all labels.
+Chunks containing samples.
+Extra fields needed by Prometheus internals.
+
+The amount of memory needed for labels will depend on the number and length of these.
+The more labels you have, or the longer the names and values are, the more memory it will use.
+
+the way labels are stored inside the prometheus also matters
+https://github.com/prometheus/prometheus/pull/10991
+
+You can calculate how much memory is needed for your time series by running this query on your Prometheus server:
+
+go_memstats_alloc_bytes / prometheus_tsdb_head_series
+
+-- Protecting Prometheus from cardinality explosions
+
+Config offered in prometheus https://prometheus.io/docs/prometheus/latest/configuration/configuration/#scrape_config
+
+
+# An uncompressed response body larger than this many bytes will cause the
+# scrape to fail. 0 means no limit. Example: 100MB.
+# This is an experimental feature, this behaviour could
+# change or be removed in the future.
+[ body_size_limit: <size> | default = 0 ]
+# Per-scrape limit on number of scraped samples that will be accepted.
+# If more than this number of samples are present after metric relabeling
+# the entire scrape will be treated as failed. 0 means no limit.
+[ sample_limit: <int> | default = 0 ]
+
+# Per-scrape limit on number of labels that will be accepted for a sample. If
+# more than this number of labels are present post metric-relabeling, the
+# entire scrape will be treated as failed. 0 means no limit.
+[ label_limit: <int> | default = 0 ]
+
+# Per-scrape limit on length of labels name that will be accepted for a sample.
+# If a label name is longer than this number post metric-relabeling, the entire
+# scrape will be treated as failed. 0 means no limit.
+[ label_name_length_limit: <int> | default = 0 ]
+
+# Per-scrape limit on length of labels value that will be accepted for a sample.
+# If a label value is longer than this number post metric-relabeling, the
+# entire scrape will be treated as failed. 0 means no limit.
+[ label_value_length_limit: <int> | default = 0 ]
+
+# Per-scrape config limit on number of unique targets that will be
+# accepted. If more than this number of targets are present after target
+# relabeling, Prometheus will mark the targets as failed without scraping them.
+# 0 means no limit. This is an experimental feature, this behaviour could
+# change in the future.
+[ target_limit: <int> | default = 0 ]
+
+this is from prometheus configs
+
+Setting all the label length related limits allows you to avoid a situation where extremely long label
+names or values end up taking too much memory.
+
+Going back to our metric with error labels we could imagine a scenario where some operation returns a huge error
+message, or even stack trace with hundreds of lines. If such a stack trace ended up as a label value it would
+take a lot more memory than other time series, potentially even megabytes. Since labels are copied around when
+Prometheus is handling queries this could cause significant memory usage increase.
+
+Setting label_limit provides some cardinality protection, but even with just one label name and huge number of
+values we can see high cardinality. Passing sample_limit is the ultimate protection from high cardinality.
+It enables us to enforce a hard limit on the number of time series we can scrape from each application instance.
+
+The downside of all these limits is that breaching any of them will cause an error for the entire scrape.
+
+If we configure a sample_limit of 100 and our metrics response contains 101 samples, then Prometheus won’t
+scrape anything at all. This is a deliberate design decision made by Prometheus developers.
+
+The main motivation seems to be that dealing with partially scraped metrics is difficult and you’re better
+off treating failed scrapes as incidents.
+
+-- How does Cloudflare deal with high cardinality?
+
+basic Limit
+
+scrape limits on all configured scrapes
+
+By default we allow upto 64 labels on each time series which is way more then anyone would use it
+
+We also limit the length of label names and values to 128 and 512 characters, which again is more than enough
+for the vast majority of scrapes.
+
+Finally we do, by default, set sample_limit to 200 - so each application can export up to 200 time
+series without any action.
+
+What happens when somebody wants to export more time series or use longer labels? All they have to do
+is set it explicitly in their scrape configuration.
+
+Those limits are there to catch accidents and also to make sure that if any application is exporting a
+high number of time series (more than 200) the team responsible for it knows about it. This helps us
+avoid a situation where applications are exporting thousands of times series that aren’t really needed.
+Once you cross the 200 time series mark, you should start thinking about your metrics more.
+
+CI Validation
+
+check configs
+and if someone inreases the limits check on prometheus servers to see if they have enough headroom
+
+For example, if someone wants to modify sample_limit, let’s say by changing existing limit of 500 to 2,000,
+for a scrape with 10 targets, that’s an increase of 1,500 per target, with 10 targets that’s 10*1,500=15,000
+extra time series that might be scraped. Our CI would check that all Prometheus servers have spare capacity
+for at least 15,000 time series before the pull request is allowed to be merged.
+
+This gives us confidence that we won’t overload any Prometheus server after applying changes.
+
+
+By running “go_memstats_alloc_bytes / prometheus_tsdb_head_series” query we know how much memory we
+need per single time series (on average), we also know how much physical memory we have available for
+Prometheus on each server, which means that we can easily calculate the rough number of time series we
+can store inside Prometheus, taking into account the fact the there’s garbage collection overhead since
+Prometheus is written in Go:
+
+Patches
+
+First patch - First is the patch that allows us to enforce a limit on the total number of time series TSDB can store at any time.
+
+https://github.com/prometheus/prometheus/pull/11124
+
+memory available to Prometheus / bytes per time series = our capacity
+
+This doesn’t capture all complexities of Prometheus but gives us a rough estimate of how many time series
+we can expect to have capacity for.
+
+By setting this limit on all our Prometheus servers we know that it will never scrape more time series than we
+have memory for. This is the last line of defense for us that avoids the risk of the Prometheus server crashing
+due to lack of memory.
+
+Second Patch -
+
+The second patch modifies how Prometheus handles sample_limit - with our patch instead of failing the entire
+scrape it simply ignores excess time series. If we have a scrape with sample_limit set to 200 and the
+application exposes 201 time series, then all except one final time series will be accepted.
+
+The entire scrape either succeeds or fails. Prometheus simply counts how many samples are there in a
+scrape and if that’s more than sample_limit allows it will fail the scrape.
+
+With our custom patch we don’t care how many samples are in a scrape. Instead we count time series as we
+append them to TSDB. Once we appended sample_limit number of samples we start to be selective.
+
+Any excess samples (after reaching sample_limit) will only be appended if they belong to time series that are
+already stored inside TSDB.
+
+The reason why we still allow appends for some samples even after we’re above sample_limit is that appending
+samples to existing time series is cheap, it’s just adding an extra timestamp & value pair.
+
+Creating new time series on the other hand is a lot more expensive - we need to allocate new memSeries instances
+with a copy of all labels and keep it in memory for at least an hour.
+
+-- Documentation
+
+Maintaining documentation
+
+Prometheus and PromQL (Prometheus Query Language) are conceptually very simple, but this means that all the
+complexity is hidden in the interactions between different elements of the whole metrics pipeline.
+
+Managing the entire lifecycle of a metric from an engineering perspective is a complex process.
+
+You must define your metrics in your application, with names and labels that will allow you to work with
+resulting time series easily. Then you must configure Prometheus scrapes in the correct way and deploy
+that to the right Prometheus server. Next you will likely need to create recording and/or alerting rules
+to make use of your time series. Finally you will want to create a dashboard to visualize all your metrics
+and be able to spot trends.
+
+There will be traps and room for mistakes at all stages of this process.
